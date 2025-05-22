@@ -1,0 +1,1 @@
+pip install ultralytics torch torchvision opencv-python firebase-admin

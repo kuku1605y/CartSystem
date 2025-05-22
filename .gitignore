@@ -1,0 +1,4 @@
+# Ignore sensitive credential files
+serviceAccountKey.json
+*.key.json
+*.secret.json
