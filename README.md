@@ -264,47 +264,111 @@ import RPi.GPIO as GPIO
 import subprocess
 import time
 import os
+import signal
 
 # Configuration
-BUTTON_PIN = 2        # Using GPIO2 (Physical Pin 3)
+BUTTON_PIN = 2        # GPIO2 (Physical Pin 3)
 SCRIPT = "/home/rahul/run_cart_system.sh"
 DEBOUNCE_TIME = 0.3    # Seconds
+POLL_INTERVAL = 0.05   # Seconds between button checks
+MIN_PRESS_INTERVAL = 2.0  # Minimum seconds between button presses (2 seconds)
+RED_LED = 22          # GPIO pin for LED
 
-def run_script():
-    print("Executing script...")
-    # Using shell=False for better security
-    subprocess.Popen(["/bin/bash", SCRIPT])
+# Global variable to track script state
+script_process = None
+last_press_time = 0
+last_valid_press_time = 0
+button_state = GPIO.HIGH
+last_button_state = GPIO.HIGH
 
-def button_pressed(channel):
-    # Extra debounce protection for GPIO2
-    time.sleep(DEBOUNCE_TIME)
-    if GPIO.input(BUTTON_PIN) == GPIO.LOW:
-        # Additional check to avoid false triggers
-        for _ in range(3):
-            if GPIO.input(BUTTON_PIN) == GPIO.HIGH:
-                return
-            time.sleep(0.05)
-        run_script()
+def is_script_running():
+    """Check if our script is currently running"""
+    try:
+        # Look for our specific script in process list
+        result = subprocess.check_output(["pgrep", "-f", "raspberry_pi_detect_products_nogui.py"])
+        pids = result.decode().strip().split('\n')
+        return bool(pids[0])  # Check if first PID exists (ignore empty strings)
+    except subprocess.CalledProcessError:
+        return False
+
+def toggle_script():
+    global script_process
+    if is_script_running():
+        print("Stopping script...")
+        GPIO.output(RED_LED, GPIO.LOW)
+
+        # Kill all instances of our script
+        result = subprocess.check_output(["pgrep", "-f", "raspberry_pi_detect_products_nogui.py"])
+        pids = result.decode().strip().split('\n')
+
+        # Kill all matching PIDs
+        for pid in pids:
+            if pid:  # Only try to kill non-empty PIDs
+                try:
+                    subprocess.run(["kill", "-9", pid])
+                except:
+                    pass
+        script_process = None
+    else:
+        print("Starting script...")
+        # Visual feedback with LED
+        GPIO.output(RED_LED, GPIO.HIGH)
+        time.sleep(0.1)
+        GPIO.output(RED_LED, GPIO.LOW)
+        time.sleep(0.1)
+        GPIO.output(RED_LED, GPIO.HIGH)
+        time.sleep(0.1)
+        GPIO.output(RED_LED, GPIO.LOW)
+        
+        script_process = subprocess.Popen(["/bin/bash", SCRIPT])
 
 def setup_gpio():
     GPIO.setmode(GPIO.BCM)
-    # Note: GPIO2 already has hardware pull-up
-    GPIO.setup(BUTTON_PIN, GPIO.IN)
+    GPIO.setwarnings(False)
+    GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # Enable pull-up
+    GPIO.setup(RED_LED, GPIO.OUT)
+    GPIO.output(RED_LED, GPIO.LOW)
+
+def check_button():
+    global last_button_state, last_press_time, last_valid_press_time
     
-    # Wait for system to fully boot before enabling button
-    time.sleep(5)
-    GPIO.add_event_detect(BUTTON_PIN, GPIO.FALLING, 
-                         callback=button_pressed, 
-                         bouncetime=300)
+    # Read current button state
+    current_state = GPIO.input(BUTTON_PIN)
+    
+    # Check for state change
+    if current_state != last_button_state:
+        last_button_state = current_state
+        return False
+    
+    # If button is pressed (LOW) and was previously not pressed
+    if current_state == GPIO.LOW:
+        current_time = time.time()
+        # Check both debounce time and minimum press interval
+        if (current_time - last_press_time > DEBOUNCE_TIME and 
+            current_time - last_valid_press_time > MIN_PRESS_INTERVAL):
+            last_press_time = current_time
+            last_valid_press_time = current_time
+            return True
+    
+    return False
 
 if __name__ == "__main__":
     setup_gpio()
     try:
-        print("Button controller running on GPIO2. Press CTRL+C to exit.")
+        print(f"Button controller ready on GPIO{BUTTON_PIN}")
+        print(f"Press button to START/STOP the script (min {MIN_PRESS_INTERVAL}s between presses)")
+        
+        # Wait for system stability
+        time.sleep(5)
+        
         while True:
-            time.sleep(1)
+            if check_button():
+                toggle_script()
+            time.sleep(POLL_INTERVAL)
+            
     except KeyboardInterrupt:
         GPIO.cleanup()
+
 ```
 
 Make Files Executable

@@ -6,6 +6,7 @@ from datetime import datetime
 import time
 from ultralytics import YOLO
 import RPi.GPIO as GPIO
+import sys
 
 # Initialize GPIO
 GPIO.setmode(GPIO.BCM)
