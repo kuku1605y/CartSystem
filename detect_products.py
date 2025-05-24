@@ -30,14 +30,17 @@ BASE_NAMES = [
     "veg_hakka_noodles", "vicco_vajradanti", "vim_bar"
 ]
 
+# Pre-sort the base names by length (longest first) for more efficient matching
+BASE_NAMES_SORTED = sorted(BASE_NAMES, key=len, reverse=True)
+
 CLASS_NAME_MAP = {}
 for class_id, name in model.names.items():
     # Find the longest matching base name
     matched_name = None
-    for base_name in BASE_NAMES:
+    for base_name in BASE_NAMES_SORTED:
         if name.startswith(base_name):
-            if matched_name is None or len(base_name) > len(matched_name):
-                matched_name = base_name
+            matched_name = base_name
+            break
     
     # If no match found, fall back to first two parts
     if matched_name is None:
@@ -69,27 +72,22 @@ def add_to_cart(product):
     cart_ref = db.collection("carts").document("current")
     
     try:
-        # First get the current cart
         cart = cart_ref.get()
         if cart.exists:
             items = cart.to_dict().get("items", [])
             
-            # Check if product already exists in cart
             found = False
             for item in items:
                 if item.get("barcode") == product.get("barcode"):
-                    # Update quantity if found
                     item["quantity"] += 1
                     item["timestamp"] = datetime.now()
                     found = True
                     break
             
             if found:
-                # Update the entire items array
                 cart_ref.update({"items": items})
                 print(f"➕ Updated quantity for: {product['name']}")
             else:
-                # Add new item if not found
                 new_item = {
                     "barcode": product.get("barcode", ""),
                     "name": product["name"],
@@ -97,12 +95,9 @@ def add_to_cart(product):
                     "quantity": 1,
                     "timestamp": datetime.now()
                 }
-                cart_ref.update({
-                    "items": firestore.ArrayUnion([new_item])
-                })
+                cart_ref.update({"items": firestore.ArrayUnion([new_item])})
                 print(f"✅ Added to cart: {product['name']}")
         else:
-            # Create new cart with the item if cart doesn't exist
             cart_ref.set({
                 "items": [{
                     "barcode": product.get("barcode", ""),
@@ -113,79 +108,96 @@ def add_to_cart(product):
                 }]
             })
             print(f"✅ Created cart with: {product['name']}")
-            
     except Exception as e:
         print(f"❌ Error updating cart: {e}")
 
-
 def process_frame(frame):
-    """Detect products and add to cart"""
+    """Detect products and manage cart additions with cooldown"""
     global last_detection_time
     
     current_time = time.time()
+    
+    # Check if we're in cooldown period
     if current_time - last_detection_time < SCAN_COOLDOWN:
         return frame
     
     results = model(frame, verbose=False)
     
+    # Process detections with highest confidence first
+    detections = []
     for result in results:
         for box in result.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
             class_id = int(box.cls[0])
             conf = float(box.conf[0])
-            
-            # Simplified product name
-            product_name = CLASS_NAME_MAP.get(class_id, f"ID {class_id}")
-            
-            # Draw bounding box and label
-            color = get_category_color(class_id)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, f"{product_name} {conf:.2f}", (x1, y1 - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            
-            # Add to cart if confidence is high enough
-            if conf > 0.5:  # Confidence threshold
-                product = lookup_product(product_name)
-                if product:
-                    add_to_cart(product)
-                    last_detection_time = current_time
-                    time.sleep(SCAN_COOLDOWN)  # Pause for cooldown
+            detections.append((conf, class_id, (x1, y1, x2, y2)))
+    
+    # Sort detections by confidence (highest first)
+    detections.sort(reverse=True, key=lambda x: x[0])
+    
+    for conf, class_id, (x1, y1, x2, y2) in detections:
+        product_name = CLASS_NAME_MAP.get(class_id, f"ID {class_id}")
+        color = get_category_color(class_id)
+        
+        # Draw bounding box for visualization
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(frame, f"{product_name} {conf:.2f}", (x1, y1 - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        
+        # Only process for cart if confidence is high enough
+        if conf > 0.5:
+            product = lookup_product(product_name)
+            if product:
+                # Immediately add to cart
+                add_to_cart(product)
+                # Set cooldown period
+                last_detection_time = current_time
+                # Break after first high-confidence detection to avoid multiple additions
+                break
     
     return frame
 
 def main():
-    # Try different backends
-    for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
-        cap = cv2.VideoCapture(0, backend)
-        if cap.isOpened():
-            print(f"Using backend: {backend}")
+    # Camera initialization
+    found = False
+    for index in range(3):  # Try index 0, 1, 2
+        for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
+            cap = cv2.VideoCapture(index, backend)
+            if cap.isOpened():
+                print(f"Camera found at index {index} using backend: {backend}")
+                found = True
+                break
+            cap.release()
+        if found:
             break
-    else:
-        print("Error: Could not open camera")
-        return
+
+    if not found:
+        print("Error: Could not open any camera")
+        sys.exit(1)
     
-    # Camera settings
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_FPS, 15)
     
-    print("System ready! Products will be added automatically. Press 'q' to quit.")
+    print("System ready! Detected products will be added immediately. Press 'q' to quit.")
     
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame, retrying...")
-            time.sleep(0.1)
-            continue
-        
-        frame = process_frame(frame)
-        cv2.imshow('Product Scanner', frame)
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    
-    cap.release()
-    cv2.destroyAllWindows()
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to grab frame, retrying...")
+                time.sleep(0.1)
+                continue
+            
+            frame = process_frame(frame)
+            cv2.imshow('Product Scanner', frame)
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+    finally:
+        # Clean up
+        cap.release()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()

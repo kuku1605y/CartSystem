@@ -70,7 +70,8 @@ for class_id, name in model.names.items():
     CLASS_NAME_MAP[class_id] = matched_name
 
 # Track recently detected objects
-recent_detections = {}  # {class_id: last_detection_time}
+last_detection_time = 0  # Track the last time any product was added
+cooldown_period = 2.0    # 2 seconds cooldown after adding a product
 
 def blink_led(pin, duration=0.5):
     """Blink an LED for a specified duration"""
@@ -141,13 +142,13 @@ def add_to_cart(product):
 
 def process_frame(frame):
     """Detect products and manage cart additions with cooldown"""
-    global recent_detections
+    global last_detection_time
     
     current_time = time.time()
     
-    # Remove old detections from tracking
-    recent_detections = {k: v for k, v in recent_detections.items() 
-                        if current_time - v < 1.0}  # 1 second cooldown
+    # Check if we're in cooldown period
+    if current_time - last_detection_time < cooldown_period:
+        return frame
     
     results = model(frame, verbose=False)
     
@@ -157,53 +158,63 @@ def process_frame(frame):
     else:
         GPIO.output(RED_LED, GPIO.LOW)
     
+    # Process detections with highest confidence first
+    detections = []
     for result in results:
         for box in result.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
             class_id = int(box.cls[0])
             conf = float(box.conf[0])
-            
-            product_name = CLASS_NAME_MAP.get(class_id, f"ID {class_id}")
-            color = get_category_color(class_id)
-            
-            # Always draw bounding box for visualization
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, f"{product_name} {conf:.2f}", (x1, y1 - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            
-            # Only process for cart if confidence is high and not in cooldown
-            if conf > 0.5 and class_id not in recent_detections:
-                product = lookup_product(product_name)
-                if product:
-                    # Mark as recently detected
-                    recent_detections[class_id] = current_time
-                    
-                    # Schedule cart addition after 1 second
-                    def delayed_add():
-                        time.sleep(1)
-                        add_to_cart(product)
-                    
-                    import threading
-                    threading.Thread(target=delayed_add).start()
+            detections.append((conf, class_id, (x1, y1, x2, y2)))
+    
+    # Sort detections by confidence (highest first)
+    detections.sort(reverse=True, key=lambda x: x[0])
+    
+    for conf, class_id, (x1, y1, x2, y2) in detections:
+        product_name = CLASS_NAME_MAP.get(class_id, f"ID {class_id}")
+        color = get_category_color(class_id)
+        
+        # Draw bounding box for visualization
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(frame, f"{product_name} {conf:.2f}", (x1, y1 - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        
+        # Only process for cart if confidence is high enough
+        if conf > 0.5:
+            product = lookup_product(product_name)
+            if product:
+                # Immediately add to cart
+                add_to_cart(product)
+                # Set cooldown period
+                last_detection_time = time.time()
+                # Break after first high-confidence detection to avoid multiple additions
+                break
     
     return frame
 
 def main():
     # Camera initialization
-    for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
-        cap = cv2.VideoCapture(0, backend)
-        if cap.isOpened():
-            print(f"Using backend: {backend}")
+    found = False
+    for index in range(3):  # Try index 0, 1, 2
+        for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
+            cap = cv2.VideoCapture(index,  backend)
+            if cap.isOpened():
+                print(f"Camera found at index {index} using backend: {backend}")
+                found = True
+                break
+            cap.release()
+        if found:
             break
-    else:
-        print("Error: Could not open camera")
-        return
+
+    if not found:
+        print("Error: Could not open any camera")
+        sys.exit(1)
     
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 15)
     
-    print("System ready! Detected products will be added to cart after 1 second. Press 'q' to quit.")
+    print("System ready! Detected products will be added immediately. Press 'q' to quit.")
     
     try:
         while True:
