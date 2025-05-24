@@ -225,14 +225,14 @@ def main():
                 continue
             
             frame = process_frame(frame)
-            cv2.imshow('Product Scanner', frame)
+            # bcv2.imshow('Product Scanner', frame)
             
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            # if cv2.waitKey(1) == ord('q'):
+                # break
     finally:
         # Clean up
         cap.release()
-        cv2.destroyAllWindows()
+        # cv2.destroyAllWindows()
         GPIO.cleanup()
 
 if __name__ == "__main__":

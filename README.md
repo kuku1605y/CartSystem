@@ -221,7 +221,7 @@ Paste this inside
 cd ~/CartSystem
 source cart_env/bin/activate
 cd Cart_system_raspberryPi
-python raspberry_pi_detect_products.py
+python raspberry_pi_detect_products_nogui.py
 ```
 Save (Ctrl+O, Enter) and exit (Ctrl+X)
 
